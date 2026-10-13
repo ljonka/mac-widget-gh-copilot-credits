@@ -1,17 +1,29 @@
 # Copilot Credits – macOS Desktop
 
 Kleines verschiebbares Desktop-Widget aus Swift/AppKit, ohne externe Bibliotheken.
+Zeigt, ob dein bisheriger Copilot-Verbrauch bei gleichem Tagesdurchschnitt
+bis zum Monatsende innerhalb des enthaltenen Credit-Budgets bleibt.
 Fragt alle **60 Sekunden** mit `gh api --hostname github.com /copilot_internal/user` die
 verbleibenden Copilot-Credits ab. Funktioniert mit Business-/Enterprise-Konten,
 sofern GitHub eine begrenzte `premium_interactions`-Quote zurückliefert.
 Zeigt Monatsverbrauch, Tagesdurchschnitt, Abweichung von einer Gleichverteilung,
 Hochrechnung zum Monatsende und Reset-Zeitpunkt. Die API liefert Credits, keine Tokenzahlen.
 
+## Voraussetzungen
+
+- macOS 13 oder neuer.
+- Swift 5.9 oder neuer, z. B. mit Xcode 15+ und ausgewählter Xcode-Toolchain.
+- [GitHub CLI](https://cli.github.com/) (`brew install gh`) und Anmeldung bei `github.com`.
+- Copilot-Konto mit begrenzter Monatsquote; Business/Enterprise wird über dieselbe API abgefragt.
+
+Die Oberfläche ist deutsch. Der Build erfolgt lokal für die Architektur des Macs.
+
 ## Lokal installieren
 
-Voraussetzungen: macOS 13+, Xcode/Swift und angemeldete GitHub CLI (`gh auth login`).
-
 ```sh
+git clone https://github.com/ljonka/mac-widget-gh-copilot-credits.git
+cd mac-widget-gh-copilot-credits
+gh auth login --hostname github.com
 bash scripts/install.sh
 ```
 
@@ -43,12 +55,53 @@ Ein nativer WidgetKit-Zeitplan garantiert keinen Minutentakt;
 deshalb läuft dies als kleines Desktop-Fenster. Während Mac-Ruhezustand erfolgen keine Abrufe.
 Der GitHub-Endpunkt ist intern und kann sich ändern.
 
-## Tests / entfernen
+## Daten und Grenzen
+
+Die App nutzt die bestehende Anmeldung der GitHub CLI. Sie speichert selbst keine Tokens
+und verwendet keine zusätzlichen Dienste oder eigene Telemetrie. Abfragen gehen an GitHub.
+Verbrauchsdaten werden nur im Arbeitsspeicher gehalten; die Fensterposition speichert macOS.
+
+Die Anzeige bezieht sich auf die enthaltene Monatsquote `premium_interactions`, bevorzugt
+mit dezimalgenauem `quota_remaining`. Zusätzlich abgerechneter Mehrverbrauch wird nicht
+ausgewertet. Unterstützt wird der Reset am ersten Tag des nächsten UTC-Monats.
+
+## Entwicklung und Tests
 
 ```sh
 swift test
-bash scripts/uninstall.sh
+swift build -c release
+# Optionale Live-Abfrage mit deiner gh-Anmeldung:
+swift run CopilotCredits --check
 ```
 
 Tests decken Dezimal-Credits, Monatsverbrauch, Gleichverteilung, Über-/Unterverbrauch,
 Prognose, Farbgrenzen, Tages-/Monatswechsel, Schaltjahr und ungültige Daten ab.
+GitHub Actions führt Tests und Release-Build unter macOS aus; dafür sind keine Zugangsdaten nötig.
+
+```text
+Sources/CreditsCore/      API-Daten und Monatsberechnung
+Sources/CopilotCredits/   gh-Abfrage, Desktop-Fenster und Menüleiste
+Tests/CreditsCoreTests/   Berechnung und API-Decodierung
+scripts/                 Lokale Installation und Deinstallation
+```
+
+## Fehlerbehebung
+
+- **Anmeldung/API-Fehler:** `gh auth status --hostname github.com` und
+  `swift run CopilotCredits --check` im Terminal ausführen.
+- **Keine begrenzten Credits:** Das Konto muss eine begrenzte `premium_interactions`-Quote liefern.
+- **Fenster nicht sichtbar:** Menüleistensymbol → **Widget zurücksetzen**.
+- **Nach „Beenden“ erneut starten:** `open ~/Applications/CopilotCredits.app`.
+- **Aktualisieren:** Im Projekt `git pull` und `bash scripts/install.sh` ausführen.
+
+## Entfernen
+
+```sh
+bash scripts/uninstall.sh
+```
+
+Entfernt App und Autostart-Eintrag aus `~/Library/LaunchAgents`.
+
+## Lizenz
+
+[MIT](LICENSE) · Copyright © 2026 Leonid Verhovskij.
