@@ -4,20 +4,11 @@ import CreditsCore
 
 @MainActor
 final class WidgetModel: ObservableObject {
-    @Published var budget: DailyBudget?
+    @Published var budget: MonthlyBudget?
     @Published var error: String?
     @Published var updated: Date?
     private let client = GitHubClient()
-    private var tracker: BudgetTracker
     private var refreshing = false
-    private let stateURL: URL
-
-    init() {
-        stateURL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/CopilotCredits/state.json")
-        tracker = (try? Data(contentsOf: stateURL))
-            .flatMap { try? JSONDecoder().decode(BudgetTracker.self, from: $0) } ?? BudgetTracker()
-    }
 
     func refresh() async {
         guard !refreshing else { return }
@@ -25,11 +16,7 @@ final class WidgetModel: ObservableObject {
         defer { refreshing = false }
         do {
             let quota = try await client.fetch()
-            let result = try tracker.update(quota)
-            try FileManager.default.createDirectory(at: stateURL.deletingLastPathComponent(),
-                                                     withIntermediateDirectories: true)
-            try JSONEncoder().encode(tracker).write(to: stateURL, options: .atomic)
-            budget = result
+            budget = try MonthlyBudget.calculate(quota)
             updated = Date()
             error = nil
         } catch {
@@ -65,41 +52,64 @@ struct WidgetView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("Copilot · Heute").font(.headline)
+                Text("Copilot · Monat").font(.system(size: 18, weight: .semibold))
                 Spacer()
                 Circle().fill(tint).frame(width: 9, height: 9)
             }
+            .overlay(WidgetDragHandle())
+            .help("Zum Verschieben hier ziehen")
             if let budget = model.budget {
                 Text("\(number(budget.percent)) %")
-                    .font(.system(size: 38, weight: .semibold, design: .rounded))
+                    .font(.system(size: 44, weight: .semibold, design: .rounded))
                     .monospacedDigit().foregroundStyle(tint)
                 ProgressView(value: min(budget.percent, 100), total: 100).tint(tint)
-                Text("\(number(budget.usedToday)) / \(number(budget.dailyBudget)) Credits heute")
-                    .font(.subheadline).monospacedDigit()
-                Text("\(number(budget.remaining)) übrig · \(budget.days) Tage inkl. heute")
-                    .font(.caption).foregroundStyle(.secondary)
+                Text("\(number(budget.usedThisPeriod)) / \(number(budget.entitlement)) Credits verbraucht")
+                    .font(.system(size: 14)).monospacedDigit()
+                Text("\(number(budget.remaining)) übrig · Tag \(budget.elapsedDays) / \(budget.totalDays)")
+                    .font(.system(size: 14)).foregroundStyle(.secondary)
                 Divider()
-                Text("Monat: \(number(budget.usedThisPeriod)) / \(number(budget.entitlement)) Credits")
-                    .font(.caption).monospacedDigit()
+                Text("Ø Tag: \(number(budget.actualDaily)) · Soll: \(number(budget.idealDaily)) Credits")
+                    .font(.system(size: 14)).monospacedDigit()
+                Text("\(budget.deviationPercent > 0 ? "+" : "")\(number(budget.deviationPercent)) % gegenüber Gleichverteilung")
+                    .font(.system(size: 14)).foregroundStyle(model.error != nil ? Color.gray : (budget.fitsBudget ? .green : .red))
+                Text("Prognose: \(number(budget.projectedUsage)) / \(number(budget.entitlement)) Credits")
+                    .font(.system(size: 14)).monospacedDigit()
+                Text(budget.fitsBudget ? "Budget reicht bis Monatsende" : "Budget wird voraussichtlich überschritten")
+                    .font(.system(size: 14, weight: .medium)).foregroundStyle(model.error != nil ? Color.gray : (budget.fitsBudget ? .green : .red))
                 Text("Reset: \(resetDate(budget.reset))")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.system(size: 14)).foregroundStyle(.secondary)
             } else {
                 Text(model.error == nil ? "Credits werden geladen …" : "Keine aktuellen Daten")
-                    .font(.subheadline)
+                    .font(.system(size: 14))
             }
             if let error = model.error {
-                Text(error).font(.caption).foregroundStyle(.secondary).lineLimit(3)
+                Text(error).font(.system(size: 14)).foregroundStyle(.secondary).lineLimit(3)
                     .help(error)
             } else if let updated = model.updated {
-                Text("Stand \(updated.formatted(date: .omitted, time: .shortened)) · Tag in UTC")
-                    .font(.caption2).foregroundStyle(.secondary)
+                Text("Stand \(updated.formatted(date: .omitted, time: .shortened)) · Tage in UTC")
+                    .font(.system(size: 13)).foregroundStyle(.secondary)
             }
         }
         .padding(16)
-        .frame(width: 300, height: 260, alignment: .topLeading)
+        .frame(width: 400, height: 380, alignment: .topLeading)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
         .preferredColorScheme(.dark)
     }
+}
+
+private struct WidgetDragHandle: NSViewRepresentable {
+    final class DragView: NSView {
+        override func mouseDown(with event: NSEvent) {
+            window?.performDrag(with: event)
+        }
+
+        override func resetCursorRects() {
+            addCursorRect(bounds, cursor: .openHand)
+        }
+    }
+
+    func makeNSView(context: Context) -> DragView { DragView() }
+    func updateNSView(_ view: DragView, context: Context) {}
 }
 
 @MainActor
@@ -111,10 +121,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 300, height: 260),
+        panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 400, height: 380),
                         styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.isFloatingPanel = false
-        panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)) + 1)
+        // Native desktop widgets are two levels above desktop icons.
+        panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)) + 3)
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary]
         panel.hidesOnDeactivate = false
         panel.isMovableByWindowBackground = true
@@ -124,6 +135,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.contentView = NSHostingView(rootView: WidgetView(model: model))
         placeOnDesktop()
         panel.setFrameAutosaveName("CopilotCreditsWidget")
+        panel.setContentSize(NSSize(width: 400, height: 380))
         panel.orderFrontRegardless()
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -144,8 +156,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func placeOnDesktop() {
         if let screen = NSScreen.main {
-            panel.setFrameOrigin(NSPoint(x: screen.visibleFrame.maxX - 320,
-                                         y: screen.visibleFrame.maxY - 280))
+            panel.setFrameOrigin(NSPoint(x: screen.visibleFrame.maxX - 420,
+                                         y: screen.visibleFrame.maxY - 400))
         }
     }
 

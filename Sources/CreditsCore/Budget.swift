@@ -53,49 +53,33 @@ public struct Quota {
 
 public enum BudgetTone { case green, yellow, red }
 
-public struct DailyBudget {
+public struct MonthlyBudget {
     public let remaining: Double
     public let entitlement: Double
     public let reset: Date
     public var usedThisPeriod: Double { max(0, entitlement - remaining) }
-    public let days: Int
-    public let dailyBudget: Double
-    public let usedToday: Double
-    public let percent: Double
-    public var tone: BudgetTone { percent <= 50 ? .green : (percent < 80 ? .yellow : .red) }
-}
-
-public struct BudgetTracker: Codable {
-    struct Baseline: Codable, Equatable {
-        let day: Date
-        let reset: Date
-        let entitlement: Double
-        let remaining: Double
-        let days: Int
+    public let totalDays: Int
+    public let elapsedDays: Int
+    public var percent: Double { usedThisPeriod / entitlement * 100 }
+    public var idealDaily: Double { entitlement / Double(totalDays) }
+    public var actualDaily: Double { usedThisPeriod / Double(elapsedDays) }
+    public var projectedUsage: Double { actualDaily * Double(totalDays) }
+    public var deviationPercent: Double {
+        let deviation = (actualDaily / idealDaily - 1) * 100
+        return abs(deviation) < 1e-9 ? 0 : deviation
     }
-    var baseline: Baseline?
+    public var fitsBudget: Bool { deviationPercent <= 0 }
+    public var tone: BudgetTone { percent <= 50 ? .green : (percent < 80 ? .yellow : .red) }
 
-    public init() {}
-
-    public mutating func update(_ quota: Quota, now: Date = Date()) throws -> DailyBudget {
+    public static func calculate(_ quota: Quota, now: Date = Date()) throws -> MonthlyBudget {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
-        let day = calendar.startOfDay(for: now)
-        let resetDay = calendar.startOfDay(for: quota.reset)
-        let days = calendar.dateComponents([.day], from: day, to: resetDay).day ?? 0
-        guard quota.reset > now, days > 0 else { throw CreditsError.expiredQuota }
-
-        if baseline?.day != day || baseline?.reset != quota.reset ||
-            baseline?.entitlement != quota.entitlement || quota.remaining > (baseline?.remaining ?? 0) {
-            baseline = Baseline(day: day, reset: quota.reset, entitlement: quota.entitlement,
-                                remaining: quota.remaining, days: days)
+        guard let month = calendar.dateInterval(of: .month, for: now),
+              quota.reset == month.end,
+              let totalDays = calendar.range(of: .day, in: .month, for: now)?.count else {
+            throw CreditsError.expiredQuota
         }
-        let baseline = baseline!
-        let budget = baseline.remaining / Double(baseline.days)
-        let used = max(0, baseline.remaining - quota.remaining)
-        let percent = budget > 0 ? used / budget * 100 : 100
-        return DailyBudget(remaining: quota.remaining, entitlement: quota.entitlement, reset: quota.reset,
-                           days: days, dailyBudget: budget,
-                           usedToday: used, percent: percent)
+        return MonthlyBudget(remaining: quota.remaining, entitlement: quota.entitlement, reset: quota.reset,
+                             totalDays: totalDays, elapsedDays: calendar.component(.day, from: now))
     }
 }

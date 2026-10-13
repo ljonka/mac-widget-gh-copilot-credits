@@ -6,10 +6,10 @@ final class BudgetTests: XCTestCase {
         ISO8601DateFormatter().date(from: value)!
     }
 
-    private func quota(_ remaining: Double = 190, reset: String = "2026-11-01") throws -> Quota {
+    private func quota(_ remaining: Double = 190, reset: String = "2026-11-01", entitlement: Double = 300) throws -> Quota {
         try Quota.decode(Data("""
         {"quota_reset_date":"\(reset)","quota_snapshots":{"premium_interactions":{
-        "entitlement":300,"quota_remaining":\(remaining),"remaining":189,"unlimited":false}}}
+        "entitlement":\(entitlement),"quota_remaining":\(remaining),"remaining":189,"unlimited":false}}}
         """.utf8))
     }
 
@@ -39,95 +39,98 @@ final class BudgetTests: XCTestCase {
         }
     }
 
-    func testFirstReadingIncludesTodayInRemainingDays() throws {
-        var tracker = BudgetTracker()
-        let result = try tracker.update(quota(), now: date("2026-10-13T19:00:00Z"))
-        XCTAssertEqual(result.days, 19)
-        XCTAssertEqual(result.dailyBudget, 10)
-        XCTAssertEqual(result.usedToday, 0)
-        XCTAssertEqual(result.percent, 0)
-    }
-
-    func testMonthlyUsageEntitlementAndResetAreAvailableForDisplay() throws {
-        var tracker = BudgetTracker()
-        let result = try tracker.update(quota(190.5), now: date("2026-10-13T19:00:00Z"))
+    func testMonthlyUsageIsKnownImmediatelyWithoutBaseline() throws {
+        let result = try MonthlyBudget.calculate(quota(190.5), now: date("2026-10-13T19:00:00Z"))
         XCTAssertEqual(result.usedThisPeriod, 109.5)
         XCTAssertEqual(result.entitlement, 300)
+        XCTAssertEqual(result.percent, 36.5)
         XCTAssertEqual(result.reset, date("2026-11-01T00:00:00Z"))
+        XCTAssertEqual(result.totalDays, 31)
+        XCTAssertEqual(result.elapsedDays, 13)
     }
 
-    func testBudgetStaysFixedThroughoutDay() throws {
-        var tracker = BudgetTracker()
-        _ = try tracker.update(quota(), now: date("2026-10-13T00:00:00Z"))
-        let result = try tracker.update(quota(182), now: date("2026-10-13T18:00:00Z"))
-        XCTAssertEqual(result.dailyBudget, 10)
-        XCTAssertEqual(result.usedToday, 8)
-        XCTAssertEqual(result.percent, 80)
-        XCTAssertEqual(result.tone, .red)
+    func testExactEvenDistributionLandsOnMonthlyBudget() throws {
+        let result = try MonthlyBudget.calculate(quota(180, entitlement: 310), now: date("2026-10-13T12:00:00Z"))
+        XCTAssertEqual(result.idealDaily, 10)
+        XCTAssertEqual(result.actualDaily, 10)
+        XCTAssertEqual(result.deviationPercent, 0)
+        XCTAssertEqual(result.projectedUsage, 310)
+        XCTAssertTrue(result.fitsBudget)
+    }
+
+    func testOverAverageProjectsOverspending() throws {
+        let result = try MonthlyBudget.calculate(quota(154, entitlement: 310), now: date("2026-10-13T12:00:00Z"))
+        XCTAssertEqual(result.actualDaily, 12)
+        XCTAssertEqual(result.deviationPercent, 20, accuracy: 0.0001)
+        XCTAssertEqual(result.projectedUsage, 372)
+        XCTAssertFalse(result.fitsBudget)
+    }
+
+    func testUnderAverageProjectsRemainingCredits() throws {
+        let result = try MonthlyBudget.calculate(quota(206, entitlement: 310), now: date("2026-10-13T12:00:00Z"))
+        XCTAssertEqual(result.actualDaily, 8)
+        XCTAssertEqual(result.deviationPercent, -20, accuracy: 0.0001)
+        XCTAssertEqual(result.projectedUsage, 248)
+        XCTAssertTrue(result.fitsBudget)
+    }
+
+    func testFractionalPointLandingIsNotAnOvershootDueToRounding() throws {
+        let result = try MonthlyBudget.calculate(quota(300 - 300.0 / 31 * 13), now: date("2026-10-13T12:00:00Z"))
+        XCTAssertEqual(result.deviationPercent, 0)
+        XCTAssertTrue(result.fitsBudget)
     }
 
     func testColorBoundariesAndOverBudget() throws {
-        for (remaining, percent, tone) in [(185.0, 50.0, BudgetTone.green),
-                                          (184.9, 51.0, .yellow),
-                                          (182.1, 79.0, .yellow),
-                                          (182.0, 80.0, .red),
-                                          (175.0, 150.0, .red)] {
-            var tracker = BudgetTracker()
-            _ = try tracker.update(quota(), now: date("2026-10-13T00:00:00Z"))
-            let result = try tracker.update(quota(remaining), now: date("2026-10-13T12:00:00Z"))
+        for (remaining, percent, tone) in [(150.0, 50.0, BudgetTone.green),
+                                          (147.0, 51.0, .yellow),
+                                          (63.0, 79.0, .yellow),
+                                          (60.0, 80.0, .red),
+                                          (0.0, 100.0, .red)] {
+            let result = try MonthlyBudget.calculate(quota(remaining), now: date("2026-10-13T12:00:00Z"))
             XCTAssertEqual(result.percent, percent, accuracy: 0.0001)
             XCTAssertEqual(result.tone, tone)
         }
     }
 
-    func testNewUTCDayStartsNewBudget() throws {
-        var tracker = BudgetTracker()
-        _ = try tracker.update(quota(), now: date("2026-10-13T23:59:00Z"))
-        let result = try tracker.update(quota(180), now: date("2026-10-14T00:00:00Z"))
-        XCTAssertEqual(result.days, 18)
-        XCTAssertEqual(result.dailyBudget, 10)
-        XCTAssertEqual(result.usedToday, 0)
+    func testUTCDayChangeUpdatesAverage() throws {
+        let before = try MonthlyBudget.calculate(quota(180, entitlement: 310), now: date("2026-10-13T23:59:59Z"))
+        let after = try MonthlyBudget.calculate(quota(180, entitlement: 310), now: date("2026-10-14T00:00:00Z"))
+        XCTAssertEqual(before.elapsedDays, 13)
+        XCTAssertEqual(after.elapsedDays, 14)
+        XCTAssertEqual(before.actualDaily, 10)
+        XCTAssertEqual(after.actualDaily, 130.0 / 14, accuracy: 0.0001)
     }
 
     func testLastDayAndLeapYear() throws {
-        var tracker = BudgetTracker()
-        let last = try tracker.update(quota(20), now: date("2026-10-31T23:59:59Z"))
-        XCTAssertEqual(last.days, 1)
-        XCTAssertEqual(last.dailyBudget, 20)
-        let leap = try tracker.update(quota(20, reset: "2028-03-01"), now: date("2028-02-28T12:00:00Z"))
-        XCTAssertEqual(leap.days, 2)
+        let last = try MonthlyBudget.calculate(quota(0), now: date("2026-10-31T23:59:59Z"))
+        XCTAssertEqual(last.elapsedDays, 31)
+        XCTAssertEqual(last.deviationPercent, 0)
+        XCTAssertTrue(last.fitsBudget)
+        let leap = try MonthlyBudget.calculate(quota(20, reset: "2028-03-01"), now: date("2028-02-28T12:00:00Z"))
+        XCTAssertEqual(leap.totalDays, 29)
+        XCTAssertEqual(leap.elapsedDays, 28)
     }
 
-    func testExhaustedCreditsAreRedWithoutDivisionByZero() throws {
-        var tracker = BudgetTracker()
-        let result = try tracker.update(quota(0), now: date("2026-10-13T12:00:00Z"))
-        XCTAssertEqual(result.dailyBudget, 0)
-        XCTAssertEqual(result.percent, 100)
-        XCTAssertEqual(result.tone, .red)
+    func testFirstDayWithNoUsageHasNoDivisionByZero() throws {
+        let result = try MonthlyBudget.calculate(quota(300), now: date("2026-10-01T00:00:00Z"))
+        XCTAssertEqual(result.elapsedDays, 1)
+        XCTAssertEqual(result.actualDaily, 0)
+        XCTAssertEqual(result.percent, 0)
+        XCTAssertEqual(result.deviationPercent, -100)
+        XCTAssertEqual(result.projectedUsage, 0)
+        XCTAssertTrue(result.fitsBudget)
     }
 
-    func testExpiredQuotaDoesNotOverwriteBaseline() throws {
-        var tracker = BudgetTracker()
-        _ = try tracker.update(quota(), now: date("2026-10-13T12:00:00Z"))
-        let before = tracker.baseline
-        XCTAssertThrowsError(try tracker.update(quota(), now: date("2026-11-01T00:00:00Z")))
-        XCTAssertEqual(tracker.baseline, before)
+    func testExpiredOrWrongMonthQuotaIsRejected() throws {
+        XCTAssertThrowsError(try MonthlyBudget.calculate(quota(), now: date("2026-11-01T00:00:00Z")))
+        XCTAssertThrowsError(try MonthlyBudget.calculate(quota(reset: "2026-12-01"), now: date("2026-10-13T12:00:00Z")))
     }
 
-    func testRestartPreservesDailyUsage() throws {
-        var tracker = BudgetTracker()
-        _ = try tracker.update(quota(), now: date("2026-10-13T01:00:00Z"))
-        let saved = try JSONEncoder().encode(tracker)
-        var restored = try JSONDecoder().decode(BudgetTracker.self, from: saved)
-        let result = try restored.update(quota(185), now: date("2026-10-13T12:00:00Z"))
-        XCTAssertEqual(result.percent, 50)
-    }
-
-    func testQuotaIncreaseStartsFreshBaseline() throws {
-        var tracker = BudgetTracker()
-        _ = try tracker.update(quota(), now: date("2026-10-13T01:00:00Z"))
-        let result = try tracker.update(quota(200), now: date("2026-10-13T12:00:00Z"))
-        XCTAssertEqual(result.usedToday, 0)
-        XCTAssertEqual(result.dailyBudget, 200.0 / 19, accuracy: 0.0001)
+    func testNewMonthUsesNewMonthLengthAndAllowance() throws {
+        let result = try MonthlyBudget.calculate(quota(300, reset: "2026-12-01"), now: date("2026-11-01T00:00:00Z"))
+        XCTAssertEqual(result.totalDays, 30)
+        XCTAssertEqual(result.elapsedDays, 1)
+        XCTAssertEqual(result.idealDaily, 10)
+        XCTAssertEqual(result.usedThisPeriod, 0)
     }
 }

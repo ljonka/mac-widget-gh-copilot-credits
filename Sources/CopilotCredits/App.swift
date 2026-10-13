@@ -10,9 +10,10 @@ struct CopilotCreditsApp {
             Task {
                 do {
                     let quota = try await GitHubClient().fetch()
-                    var tracker = BudgetTracker()
-                    let budget = try tracker.update(quota)
-                    print("OK: \(budget.remaining) Credits, \(budget.days) Tage, \(budget.dailyBudget) Credits/Tag")
+                    let budget = try MonthlyBudget.calculate(quota)
+                    print("OK: \(budget.usedThisPeriod)/\(budget.entitlement) Credits verbraucht (\(budget.percent) %)")
+                    print("Tag \(budget.elapsedDays)/\(budget.totalDays): Ø \(budget.actualDaily), Soll \(budget.idealDaily) Credits/Tag")
+                    print("Abweichung \(budget.deviationPercent) %, Prognose \(budget.projectedUsage) Credits: \(budget.fitsBudget ? "Budget reicht" : "Budget überschritten")")
                     exit(0)
                 } catch {
                     fputs("\(error.localizedDescription)\n", stderr)
